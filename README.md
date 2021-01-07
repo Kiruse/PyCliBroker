@@ -47,6 +47,9 @@ As mentioned above, `clibroker.session` is probably the most useful feature of t
 above demonstrates, it allows "grouping" CLI commands together and to postpone any other intermittent call until this
 session is closed.
 
+# Documentation
+Documentation is available at [pyclibroker.readthedocs.io](https://pyclibroker.readthedocs.io/).
+
 # License
 MIT License
 
