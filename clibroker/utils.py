@@ -12,8 +12,24 @@ def has_running_loop() -> bool:
     except RuntimeError:
         return False
 
-def isempty(coll: Sequence) -> bool:
-    return len(coll) == 0
+def first(iterable: Iterable[T]) -> T:
+    return next(iter(iterable))
+
+def last(iterable: Iterable[T]) -> T:
+    it = iter(iterable)
+    val = next(it)
+    try:
+        while True:
+            val = next(it)
+    except StopIteration:
+        return val
+
+def isempty(iterable: Iterable) -> bool:
+    try:
+        next(iter(iterable))
+        return False
+    except StopIteration:
+        return True
 
 def shift(lst: List[T]) -> T:
     val = lst[0]
