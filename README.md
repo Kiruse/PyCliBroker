@@ -156,6 +156,7 @@ The following points probably need more testing:
 * Multithreaded use - theoretically supported but untested
 * Request cancellation
 * `standby` feature
+* Python version - I'm not entirely sure what the oldest supported Python version is (3.6?)
 
 # License
 MIT License
