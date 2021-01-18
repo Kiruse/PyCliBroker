@@ -15,6 +15,7 @@ import sys
 
 
 class InvalidStateError(Exception): pass
+class Reschedule(Exception): pass
 class SubsessionCloseWarning(Warning): pass
 
 
@@ -27,6 +28,7 @@ class Session:
         self._thread: Optional[Thread] = None
         self._threadlock = RLock()
         self._finish_event = Event()
+        self._reschedule_standby = Event()
         
         if parent:
             self.autoflush = autoflush if autoflush is not None else parent.autoflush
@@ -41,15 +43,18 @@ class Session:
     
     
     def read(self, n: int = -1) -> AFuture[str]:
+        self._reschedule_standby.set()
         if n < 0:
             return self._commit(ReadAllRequest())
         else:
             return self._commit(ReadRequest(n=n))
     
     def readline(self) -> AFuture[str]:
+        self._reschedule_standby.set()
         return self._commit(ReadlineRequest())
     
     def password(self, prompt: str = 'Enter password: ') -> AFuture[str]:
+        self._reschedule_standby.set()
         return self._commit(PasswordRequest(prompt=prompt))
     
     def write(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> AFuture[int]:
@@ -62,7 +67,11 @@ class Session:
         return self._commit(FlushRequest(flush_stdout=flush_stdout, flush_stderr=flush_stderr))
     
     def session(self, autoflush: Optional[bool] = None, stdout: Optional[IO] = None, stderr: Optional[IO] = None, stdin: Optional[IO] = None) -> AFuture[Session]:
+        self._reschedule_standby.set()
         return self._commit(SessionRequest(Session(parent=self, stdout=stdout, stdin=stdin, stderr=stderr, autoflush=autoflush)))
+    
+    def standby(self) -> AFuture[str]:
+        return self._commit(StandbyRequest())
     
     def _commit(self, req: BaseRequest):
         self.pending.push(req)
@@ -80,7 +89,10 @@ class Session:
         
         req = self.pending.pop()
         while req:
-            req.execute(self)
+            try:
+                req.execute(self)
+            except Reschedule:
+                self.pending.push(req)
             req = self.pending.pop(wait=0.01)
         
         with self._threadlock:
@@ -217,6 +229,25 @@ class SessionRequest(BaseRequest):
         self.subsession.wait() # Postpone this thread's execution until subsession completes.
         session.subsession = None
 
+class StandbyRequest(BaseRequest):
+    def execute(self, session: Session):
+        if isempty(session.buffer):
+            session.buffer += session.stdin.readline()
+        
+        if session._reschedule_standby.is_set():
+            session._reschedule_standby.clear()
+            raise Reschedule()
+        
+        if not self.cfuture.cancelled():
+            try:
+                idx = session.buffer.index('\n')
+            except ValueError:
+                ret, session.buffer = session.buffer, ''
+                self.cfuture.set_result(ret)
+            else:
+                ret, session.buffer = session.buffer[:idx+1], session.buffer[idx+1:]
+                self.cfuture.set_result(ret)
+
 
 class RequestQueue:
     def __init__(self):
@@ -251,6 +282,7 @@ readline  = _session.readline
 write     = _session.write
 writeline = _session.writeline
 password  = _session.password
+standby   = _session.standby
 
 def session(autoflush: bool = False):
     return _session.session(autoflush)

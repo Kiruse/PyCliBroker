@@ -1,8 +1,10 @@
 """CliBroker main module unit tests.
 Copyright (c) Kiruse 2021. See license in LICENSE."""
+from __future__ import annotations
 from asyncio import sleep
-import asyncio
 from threading import Condition
+from typing import *
+import asyncio
 import clibroker
 import io
 import pytest
@@ -49,6 +51,17 @@ class SimStdin(StringBuffer):
             else:
                 ret, self.buffer = self.buffer[:idx+1], self.buffer[idx+1:]
                 return ret
+
+class BoolRef:
+    def __init__(self, init: bool = False):
+        self.value = init
+    
+    def set(self, value: bool) -> BoolRef:
+        self.value = value
+        return self
+    
+    def get(self) -> bool:
+        return self.value
 
 buffout = clibroker.clibroker._session.stdout = clibroker.clibroker._session.stderr = SimStdout()
 buffin  = clibroker.clibroker._session.stdin  = SimStdin()
@@ -121,3 +134,26 @@ async def test_cancellation():
     buffin.put('test')
     assert await asyncio.wait_for(t2, timeout=1) == 'test'
 
+@pytest.mark.asyncio
+async def test_standby():
+    standby_done = BoolRef(False)
+    
+    async def task(standby_done: BoolRef):
+        assert await clibroker.standby() == 'foobar'
+        standby_done.set(True)
+    
+    t0 = asyncio.create_task(task(standby_done))
+    t1 = clibroker.readline()
+    t2 = clibroker.readline()
+    assert not standby_done.get()
+    
+    buffin.put('test 1\n')
+    buffin.put('test 2')
+    assert await t1 == 'test 1\n'
+    assert await t2 == 'test 2'
+    assert not standby_done.get()
+    
+    buffin.put('foobar')
+    await t0
+    assert buffin.take() == ''
+    assert standby_done.get()
