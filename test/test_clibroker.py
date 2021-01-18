@@ -112,3 +112,12 @@ async def test_session():
     t2 = asyncio.create_task(with_session())
     await t1; await t2
 
+@pytest.mark.asyncio
+async def test_cancellation():
+    t1 = clibroker.readline()
+    t2 = clibroker.readline()
+    await asyncio.sleep(0.1)
+    t1.cancel()
+    buffin.put('test')
+    assert await asyncio.wait_for(t2, timeout=1) == 'test'
+

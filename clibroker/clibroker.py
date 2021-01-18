@@ -122,13 +122,14 @@ class BaseReadRequest(BaseRequest):
         if isempty(session.buffer):
             session.buffer += session.stdin.readline()
         
-        try:
-            result, session.buffer = self._execute(session)
-            self.cfuture.set_result(result)
-        except KeyboardInterrupt:
-            raise
-        except:
-            self.cfuture.set_exception(sys.exc_info()[1])
+        if not self.cfuture.cancelled():
+            try:
+                result, session.buffer = self._execute(session)
+                self.cfuture.set_result(result)
+            except KeyboardInterrupt:
+                raise
+            except:
+                self.cfuture.set_exception(sys.exc_info()[1])
     
     def _execute(self, session: Session) -> Tuple[str, str]:
         raise NotImplementedError()
