@@ -8,7 +8,7 @@ sys.path.append(path.dirname(path.dirname(__file__)))
 import clibroker as cli
 
 async def main():
-    await cli.writeline('Hello', 'world!', sep=', ')
+    cli.writeline('Hello', 'world!', sep=', ')
     t1 = asyncio.create_task(async1())
     t2 = asyncio.create_task(async2())
     await asyncio.wait((t1, t2))
@@ -20,7 +20,7 @@ async def async1():
 
 async def async2():
     with await cli.session(autoflush=True) as sess:
-        await sess.write("Hello! Are you there? Say something! ")
+        sess.write("Hello! Are you there? Say something! ")
         response = await sess.readline()
         if len(response) > 0:
             await sess.writeline(f'Too late now. >:c')

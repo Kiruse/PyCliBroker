@@ -40,29 +40,29 @@ class Session:
             self.stdin  = stdin  if stdin  else sys.stdin
     
     
-    async def read(self, n: int = -1) -> str:
+    def read(self, n: int = -1) -> AFuture[str]:
         if n < 0:
-            return await self._commit(ReadAllRequest())
+            return self._commit(ReadAllRequest())
         else:
-            return await self._commit(ReadRequest(n=n))
+            return self._commit(ReadRequest(n=n))
     
-    async def readline(self) -> str:
-        return await self._commit(ReadlineRequest())
+    def readline(self) -> AFuture[str]:
+        return self._commit(ReadlineRequest())
     
-    async def password(self, prompt: str = 'Enter password: ') -> str:
-        return await self._commit(PasswordRequest(prompt=prompt))
+    def password(self, prompt: str = 'Enter password: ') -> AFuture[str]:
+        return self._commit(PasswordRequest(prompt=prompt))
     
-    async def write(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> int:
-        return await self._commit(WriteRequest(msg=buildmsg(data, sep), err=err, autoflush=autoflush if autoflush is not None else self.autoflush))
+    def write(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> AFuture[int]:
+        return self._commit(WriteRequest(msg=buildmsg(data, sep), err=err, autoflush=autoflush if autoflush is not None else self.autoflush))
     
-    async def writeline(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> int:
-        return await self._commit(WriteRequest(msg=buildmsg(data, sep) + '\n', err=err, autoflush=autoflush if autoflush is not None else self.autoflush))
+    def writeline(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> AFuture[int]:
+        return self._commit(WriteRequest(msg=buildmsg(data, sep) + '\n', err=err, autoflush=autoflush if autoflush is not None else self.autoflush))
     
-    async def flush(self, flush_stdout: bool = True, flush_stderr: bool = True) -> None:
-        return await self._commit(FlushRequest(flush_stdout=flush_stdout, flush_stderr=flush_stderr))
+    def flush(self, flush_stdout: bool = True, flush_stderr: bool = True) -> AFuture[None]:
+        return self._commit(FlushRequest(flush_stdout=flush_stdout, flush_stderr=flush_stderr))
     
-    async def session(self, autoflush: Optional[bool] = None, stdout: Optional[IO] = None, stderr: Optional[IO] = None, stdin: Optional[IO] = None) -> Session:
-        return await self._commit(SessionRequest(Session(parent=self, stdout=stdout, stdin=stdin, stderr=stderr, autoflush=autoflush)))
+    def session(self, autoflush: Optional[bool] = None, stdout: Optional[IO] = None, stderr: Optional[IO] = None, stdin: Optional[IO] = None) -> AFuture[Session]:
+        return self._commit(SessionRequest(Session(parent=self, stdout=stdout, stdin=stdin, stderr=stderr, autoflush=autoflush)))
     
     def _commit(self, req: BaseRequest):
         self.pending.push(req)
