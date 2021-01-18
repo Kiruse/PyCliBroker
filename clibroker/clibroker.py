@@ -1,133 +1,242 @@
 """CliBroker implementation.
+TODO: Terminal size & auto-word-wrap
 Copyright (c) Kiruse 2021. See license in LICENSE."""
 from __future__ import annotations
-from asyncio.exceptions import InvalidStateError
+from asyncio import Future as AFuture
+from concurrent.futures import Future as CFuture
 from getpass import getpass
-from piodispatch import dispatch
+from threading import Condition, Event, RLock, Thread
+import threading
+from time import sleep
 from typing import *
 from warnings import warn
 from .utils import *
 import sys
 
-class SubsessionCloseWarning(Warning):
-    pass
+
+class InvalidStateError(Exception): pass
+class SubsessionCloseWarning(Warning): pass
 
 
 class Session:
-    def __init__(self, parent: Optional[Session] = None, stdout: IO = sys.stdout, stderr: IO = sys.stderr, stdin: IO = sys.stdin, autoflush: bool = False):
-        self.stdout, self.stderr, self.stdin = stdout, stderr, stdin
-        self.parent: Optional[Session] = parent
+    def __init__(self, parent: Optional[Session] = None, autoflush: Optional[bool] = None, stdout: Optional[IO] = None, stderr: Optional[IO] = None, stdin: Optional[IO] = None):
+        self.parent = parent
+        self.buffer = ''
+        self.pending = RequestQueue()
         self.subsession: Optional[Session] = None
-        self.autoflush = autoflush
-        self._closed = asyncio.Event()
+        self._thread: Optional[Thread] = None
+        self._threadlock = RLock()
+        self._finish_event = Event()
+        
+        if parent:
+            self.autoflush = autoflush if autoflush is not None else parent.autoflush
+            self.stdout = stdout if stdout else parent.stdout
+            self.stderr = stderr if stderr else parent.stderr
+            self.stdin  = stdin  if stdin  else parent.stdin
+        else:
+            self.autoflush = autoflush if autoflush is not None else False
+            self.stdout = stdout if stdout else sys.stdout
+            self.stderr = stderr if stderr else sys.stderr
+            self.stdin  = stdin  if stdin  else sys.stdin
     
-    async def read(self, n: int = 1) -> str:
-        """Read at most n characters from `stdin`."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
-        while self.subsession:
-            await self.subsession
-        return await dispatch(self.stdin.read, n)
+    
+    async def read(self, n: int = -1) -> str:
+        if n < 0:
+            return await self._commit(ReadAllRequest())
+        else:
+            return await self._commit(ReadRequest(n=n))
     
     async def readline(self) -> str:
-        """Read an entire line from `stdin`."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
+        return await self._commit(ReadlineRequest())
+    
+    async def password(self, prompt: str = 'Enter password: ') -> str:
+        return await self._commit(PasswordRequest(prompt=prompt))
+    
+    async def write(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> int:
+        return await self._commit(WriteRequest(msg=buildmsg(data, sep), err=err, autoflush=autoflush if autoflush is not None else self.autoflush))
+    
+    async def writeline(self, *data, sep: str = ' ', err: bool = False, autoflush: Optional[bool] = None) -> int:
+        return await self._commit(WriteRequest(msg=buildmsg(data, sep) + '\n', err=err, autoflush=autoflush if autoflush is not None else self.autoflush))
+    
+    async def flush(self, flush_stdout: bool = True, flush_stderr: bool = True) -> None:
+        return await self._commit(FlushRequest(flush_stdout=flush_stdout, flush_stderr=flush_stderr))
+    
+    async def session(self, autoflush: Optional[bool] = None, stdout: Optional[IO] = None, stderr: Optional[IO] = None, stdin: Optional[IO] = None) -> Session:
+        return await self._commit(SessionRequest(Session(parent=self, stdout=stdout, stdin=stdin, stderr=stderr, autoflush=autoflush)))
+    
+    def _commit(self, req: BaseRequest):
+        self.pending.push(req)
+        if not self._thread:
+            with self._threadlock:
+                if not self._thread:
+                    self._thread = Thread(target=self._runner)
+                    self._thread.start()
+        return asyncio.wrap_future(req.cfuture)
+    
+    
+    def _runner(self):
         while self.subsession:
-            await self.subsession
-        return await dispatch(self.stdin.readline)
-    
-    async def password(self, prompt: str = 'Password: ') -> str:
-        """Read a password from `stdin`. The user's input will not be echoed to improve security.
+            self.subsession.wait()
         
-        Notice: While it is possible to change CliBroker's stdin, stdout, and stderr streams, `password` only works with
-        `sys.stdin` and `sys.stdout`. Other uses are non-sense."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
-        while self.subsession:
-            await self.subsession
-        return await dispatch(getpass, prompt)
-    
-    async def write(self, *data, sep: str = ' ', err: bool = False, flush: Optional[bool] = None) -> int:
-        """Write all `data` stringified and joined by `sep`. If `err` is false, data is written to `stdout`, else to
-        `stderr`. If `flush` is true, stream is automatically flushed.
+        req = self.pending.pop()
+        while req:
+            req.execute(self)
+            req = self.pending.pop(wait=0.01)
         
-        If `flush` is None, resorts to default behavior of the session. Global session has autoflush enabled. By default,
-        sessions opened from global session do not autoflush. Other sessions adopt their parent session's autoflush behavior."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
-        while self.subsession:
-            await self.subsession
-        io = self.stdout if not err else self.stderr
-        read = await dispatch(io.write, buildmsg(data, sep))
-        await self._autoflush(flush, err)
-        return read
+        with self._threadlock:
+            self._thread = None
     
-    async def writeline(self, *data, sep: str = ' ', err: bool = False, flush: Optional[bool] = None) -> int:
-        """Like `write`, except a newline is appended to the data."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
-        while self.subsession:
-            await self.subsession
-        
-        io = self.stdout if not err else self.stderr
-        read = await dispatch(io.write, buildmsg(data, sep) + '\n')
-        await self._autoflush(flush, err)
-        return read
-    
-    async def _autoflush(self, flush: Optional[bool], err: bool):
-        io = self.stdout if not err else self.stderr
-        if flush is None:
-            flush = self.autoflush
-        if flush:
-            await dispatch(io.flush)
-    
-    async def flush(self, flush_stdout: bool = True, flush_stderr: bool = False) -> None:
-        """Flush stdout and/or stderr, or neither (for whatever reason)."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
-        if flush_stdout:
-            await dispatch(self.stdout.flush)
-        if flush_stderr:
-            await dispatch(self.stderr.flush)
-    
-    def session(self, autoflush: Optional[bool] = None) -> Session:
-        """Create and return a new subsession. Any other command issued on the original session is postponed until the
-        subsession is concluded.
-        
-        The new subsession's autoflush behavior may be specified by these values:
-        - `True`: Automatically flush after `write` and `writeline` commands.
-        - `False`: Do not automatically flush.
-        - `None`: Adopt parent session's autoflush behavior at the time of this call."""
-        if self.isclosed():
-            raise InvalidStateError("Session closed")
-        self.subsession = Session(self, self.stdout, self.stderr, self.stdin, autoflush if autoflush is not None else self.autoflush)
-        return self.subsession
+    def wait(self):
+        self._finish_event.wait()
     
     
-    def close(self):
-        """Close this session. The parent's pending commands will be released in order. This session may no longer be
-        used to issue commands."""
-        self.parent.subsession = None
-        if self.subsession:
-            warn(SubsessionCloseWarning('An active subsession is being closed'))
-            self.subsession.close()
-        self._closed.set()
+    def close(self) -> None:
+        if self == _session:
+            raise InvalidStateError('Cannot close global session')
+        self.pending.clear()
+        self._finish_event.set()
     
-    def isclosed(self):
-        """Test if this session is already closed."""
-        return self._closed.is_set()
+    def isclosed(self) -> bool:
+        return self._finish_event.is_set()
     
-    async def __aenter__(self):
-        if self.isclosed():
-            raise InvalidStateError("Session already closed")
+    def __enter__(self):
+        if self == _session:
+            raise InvalidStateError('Cannot enter global session')
+        if self != self.parent.subsession:
+            raise InvalidStateError('Invalid enter on unregistered subsession')
         return self
     
-    async def __aexit__(self, *args):
+    def __exit__(self, ex_t, ex_v, ex_tb):
         self.close()
+
+
+class BaseRequest:
+    def __init__(self):
+        self.cfuture = CFuture()
     
-    def __await__(self):
-        yield from self._closed.wait().__await__()
+    def execute(self):
+        raise NotImplementedError()
+
+class BaseReadRequest(BaseRequest):
+    def execute(self, session: Session):
+        if isempty(session.buffer):
+            session.buffer += session.stdin.readline()
+        
+        try:
+            result, session.buffer = self._execute(session)
+            self.cfuture.set_result(result)
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.cfuture.set_exception(sys.exc_info()[1])
+    
+    def _execute(self, session: Session) -> Tuple[str, str]:
+        raise NotImplementedError()
+
+class ReadRequest(BaseReadRequest):
+    def __init__(self, n: int, **kwargs):
+        super().__init__(**kwargs)
+        assert n >= 0
+        self.n = n
+    
+    def _execute(self, session: Session):
+        return session.buffer[:self.n], session.buffer[self.n:]
+
+class ReadAllRequest(BaseReadRequest):
+    def _execute(self, session: Session):
+        return session.buffer, ''
+
+class ReadlineRequest(BaseReadRequest):
+    def _execute(self, session: Session):
+        try:
+            idx = session.buffer.index('\n')
+            return session.buffer[:idx+1], session.buffer[idx+1:]
+        except ValueError:
+            return session.buffer, ''
+
+class PasswordRequest(BaseRequest):
+    def __init__(self, prompt: str, **kwargs):
+        super().__init__(**kwargs)
+        self.prompt = prompt
+    
+    def execute(self, session: Session):
+        try:
+            self.cfuture.set_result(getpass(self.prompt, stream=session.stderr))
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.cfuture.set_exception(sys.exc_info()[1])
+
+class WriteRequest(BaseRequest):
+    def __init__(self, msg: str, autoflush: bool, err: bool, **kwargs):
+        super().__init__(**kwargs)
+        self.msg = msg
+        self.autoflush = autoflush
+        self.err = err
+    
+    def execute(self, session: Session):
+        try:
+            io = session.stdout if not self.err else session.stderr
+            written = io.write(self.msg)
+            if self.autoflush:
+                io.flush()
+            self.cfuture.set_result(written)
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.cfuture.set_exception(sys.exc_info()[1])
+
+class FlushRequest(BaseRequest):
+    def __init__(self, flush_stdout = True, flush_stderr = True, **kwargs):
+        super().__init__(**kwargs)
+        self.flush_stdout = flush_stdout
+        self.flush_stderr = flush_stderr
+    
+    def execute(self, session: Session):
+        try:
+            session = session.get()
+            if self.flush_stdout:
+                session.stdout.flush()
+            if self.flush_stderr:
+                session.stderr.flush()
+            self.cfuture.set_result(None)
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.cfuture.set_exception(sys.exc_info()[1])
+
+class SessionRequest(BaseRequest):
+    def __init__(self, subsession: Session, **kwargs):
+        super().__init__(**kwargs)
+        self.subsession = subsession
+    
+    def execute(self, session: Session):
+        session.subsession = self.subsession
+        self.cfuture.set_result(self.subsession)
+        self.subsession.wait() # Postpone this thread's execution until subsession completes.
+        session.subsession = None
+
+
+class RequestQueue:
+    def __init__(self):
+        self.queue: List[BaseRequest] = []
+        self.cond = Condition()
+    
+    def push(self, req: BaseRequest) -> RequestQueue:
+        with self.cond:
+            self.queue.append(req)
+            self.cond.notify_all()
+            return self
+    
+    def pop(self, wait: Union[int, float, None] = None) -> Optional[BaseRequest]:
+        with self.cond:
+            self.cond.wait_for(lambda: not isempty(self.queue), wait)
+            return shift(self.queue) if not isempty(self.queue) else None
+    
+    def clear(self) -> RequestQueue:
+        with self.cond:
+            self.queue = []
+            return self
 
 
 def buildmsg(data: Iterable, sep: str) -> str:
