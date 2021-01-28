@@ -27,7 +27,7 @@ class Session:
         self.subsession: Optional[Session] = None
         self._thread: Optional[Thread] = None
         self._threadlock = RLock()
-        self._finish_event = Event()
+        self._finish_event = SyncEvent()
         self._reschedule_standby = Event()
         
         if parent:
@@ -84,6 +84,7 @@ class Session:
     
     
     def _runner(self):
+        self._finish_event.clear()
         while self.subsession:
             self.subsession.wait()
         
@@ -97,9 +98,13 @@ class Session:
         
         with self._threadlock:
             self._thread = None
+            self._finish_event.set()
     
     def wait(self):
         self._finish_event.wait()
+    
+    def __await__(self):
+        yield from self._finish_event.__await__()
     
     
     def close(self) -> None:
@@ -270,6 +275,40 @@ class RequestQueue:
             self.queue = []
             return self
 
+class SyncEvent:
+    """A union of `threading.Event` and `asyncio.Event` using `concurrent.futures.Future` and `asyncio.wrap_future`.
+    
+    Waiting for the event in threadland uses the `wait([timeout])` method while waiting for the event in asyncio-land
+    uses `await event`.
+    
+    Note that the extra overhead of thread synchronization is likely less efficient than a pure `asyncio.Event`. Hence,
+    this class should be avoided where possible."""
+    
+    def __init__(self, initial: bool = False):
+        self.lock = Condition()
+        self.future = CFuture()
+        if initial: self.future.set_result(True)
+    
+    def clear(self):
+        with self.lock:
+            self.future = CFuture()
+    
+    def set(self):
+        with self.lock:
+            self.future.set_result(True)
+            self.lock.notify_all()
+    
+    def is_set(self) -> bool:
+        return self.future.done()
+    
+    def wait(self, timeout: Optional[float] = None):
+        if not self.future.done():
+            with self.lock:
+                self.lock.wait_for(lambda: self.future.done(), timeout=timeout)
+    
+    def __await__(self):
+        yield from asyncio.wrap_future(self.future).__await__()
+
 
 def buildmsg(data: Iterable, sep: str) -> str:
     return sep.join(str(dat) for dat in data)
@@ -286,3 +325,6 @@ standby   = _session.standby
 
 def session(autoflush: bool = False):
     return _session.session(autoflush)
+
+async def wait():
+    await _session

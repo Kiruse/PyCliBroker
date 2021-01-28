@@ -3,6 +3,7 @@ Copyright (c) Kiruse 2021. See license in LICENSE."""
 from __future__ import annotations
 from asyncio import sleep
 from threading import Condition
+from time import time
 from typing import *
 import asyncio
 import clibroker
@@ -157,3 +158,23 @@ async def test_standby():
     await t0
     assert buffin.take() == ''
     assert standby_done.get()
+
+@pytest.mark.asyncio
+async def test_wait():
+    # If this test fails, perhaps increase the iterations
+    iterations = 1000
+    
+    t0 = time()
+    for _ in range(iterations):
+        clibroker.write('foo ')
+    t1 = time()
+    assert t1-t0 < 1
+    
+    await clibroker.wait()
+    
+    t2 = time()
+    for _ in range(iterations):
+        clibroker.write('bar ')
+    await clibroker.wait()
+    t3 = time()
+    assert t3-t2 > t1-t0
