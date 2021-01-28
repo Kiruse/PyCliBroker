@@ -294,9 +294,12 @@ class SyncEvent:
             self.future = CFuture()
     
     def set(self):
-        with self.lock:
-            self.future.set_result(True)
-            self.lock.notify_all()
+        # Double-checked sync lock for extra performance
+        if not self.is_set():
+            with self.lock:
+                if not self.is_set():
+                    self.future.set_result(True)
+                    self.lock.notify_all()
     
     def is_set(self) -> bool:
         return self.future.done()
